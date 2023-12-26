@@ -1,17 +1,18 @@
 from kivy.uix.anchorlayout import AnchorLayout
 from kivy.uix.label import Label
 from kivy.graphics import Fbo, Color, Rectangle, Scale
-from kivy.properties import ColorProperty, StringProperty, ObjectProperty
+from kivy.properties import ColorProperty, StringProperty, ObjectProperty, BooleanProperty
 from kivy.utils import platform
 from threading import Thread, Event
-
+from kivy.logger import Logger
 
 if platform == 'android':
     from .preview_camerax import PreviewCameraX as CameraPreview
 else:
     from .preview_kivycamera import PreviewKivyCamera as CameraPreview
     from .preview_kivycamera import KivyCameraProviderInfo
-    
+
+
 class CameraProviderInfo():
     def get_name(self):
         if platform == 'android':
@@ -20,15 +21,15 @@ class CameraProviderInfo():
             provider = KivyCameraProviderInfo().get_name()
         return provider
 
-class Preview(AnchorLayout):
 
+class Preview(AnchorLayout):
     ##########################################
     # Layout Properties
     ##########################################
 
-    aspect_ratio      = StringProperty()
-    orientation       = StringProperty()
-    letterbox_color   = ColorProperty('black')
+    aspect_ratio = StringProperty()
+    orientation = StringProperty()
+    letterbox_color = ColorProperty('black')
     filepath_callback = ObjectProperty()
     inhibit_property = False
     preview = None
@@ -43,6 +44,8 @@ class Preview(AnchorLayout):
         self.anchor_y = 'center'
         self.label = Label()
         self.preview = CameraPreview()
+        self._stop_thread = False
+        self.analyse_thread = None
         self.add_widget(self.label)
         self.add_widget(self.preview)
         self.inhibit_property = False
@@ -60,39 +63,41 @@ class Preview(AnchorLayout):
         self._image_available = Event()
         self.analyze_resolution = 1024
         self.auto_analyze_resolution = []
-    
-    def on_orientation(self,instance,orientation):
+
+    def on_orientation(self, instance, orientation):
         if self.preview and not self.inhibit_property:
             self.preview.set_orientation(orientation)
 
-    def on_aspect_ratio(self,instance, aspect_ratio):
-        if  self.preview and not self.inhibit_property:
+    def on_aspect_ratio(self, instance, aspect_ratio):
+        if self.preview and not self.inhibit_property:
             self.preview.set_aspect_ratio(aspect_ratio)
 
     def on_size(self, layout, size):
         self.label.canvas.clear()
         with self.label.canvas:
-            Color (*self.letterbox_color) 
-            Rectangle(pos = self.pos, size = self.size)
+            Color(*self.letterbox_color)
+            Rectangle(pos=self.pos, size=self.size)
 
     ##########################################
     # User Events - All Platforms
     ##########################################
 
-    def connect_camera(self, analyze_pixels_resolution = 1024,
-                       enable_analyze_pixels = False, **kwargs):
+    def connect_camera(self, analyze_pixels_resolution=1024,
+                       enable_analyze_pixels=False, **kwargs):
         self.analyze_resolution = analyze_pixels_resolution
         self.inhibit_property = True
         self.camera_connected = True
         self._fbo = None
+        Logger.info("Camera: Camera connected")
         if enable_analyze_pixels:
-            Thread(target=self.image_scheduler, daemon=True).start()
-        self.preview.connect_camera(analyze_callback =
-                                        self.analyze_image_callback_schedule,
-                                    analyze_proxy_callback =
-                                        self.analyze_imageproxy_callback,
-                                    canvas_callback =
-                                        self.possible_canvas_callback,
+            self._busy = False
+            self.analyse_thread = Thread(target=self.image_scheduler, args=(lambda: self._stop_thread,)).start()
+        self.preview.connect_camera(analyze_callback=
+                                    self.analyze_image_callback_schedule,
+                                    analyze_proxy_callback=
+                                    self.analyze_imageproxy_callback,
+                                    canvas_callback=
+                                    self.possible_canvas_callback,
                                     **kwargs)
 
     def disconnect_camera(self):
@@ -100,6 +105,12 @@ class Preview(AnchorLayout):
         self.camera_connected = False
         self.preview.disconnect_camera()
         self.inhibit_property = False
+        if self.analyse_thread is not None:
+            self._stop_thread = True
+            self.analyse_thread.join()
+            self.analyse_thread = None
+            self._stop_thread = False
+        Logger.info("Camera: Camera disconnected")
 
     def capture_screenshot(self, **kwargs):
         self.preview.capture_screenshot(**kwargs)
@@ -124,7 +135,7 @@ class Preview(AnchorLayout):
     # User Events - Android Only
     ##########################################
 
-    def flash(self, state = None):
+    def flash(self, state=None):
         return self.preview.flash(state)
 
     def torch(self, state):
@@ -164,19 +175,19 @@ class Preview(AnchorLayout):
                 # The aspect ratio is always the same as the Preview
                 # self.scale is a scalar
                 fbo_scale = max(max(texture.size) / self.analyze_resolution, 1)
-                fbo_size  = (round(texture.size[0]/fbo_scale),
-                             round(texture.size[1]/fbo_scale))
+                fbo_size = (round(texture.size[0] / fbo_scale),
+                            round(texture.size[1] / fbo_scale))
                 scale = tscale * fbo_scale
-            origin    = (round(fbo_size[0]/2), round(fbo_size[1]/2))
+            origin = (round(fbo_size[0] / 2), round(fbo_size[1] / 2))
             # new or resized texture
-            if not self._fbo or self._fbo.size[0] != fbo_size[0] or\
-               self._fbo.size[1] != fbo_size[1]:
-                self._fbo = Fbo(size = fbo_size)
+            if not self._fbo or self._fbo.size[0] != fbo_size[0] or \
+                    self._fbo.size[1] != fbo_size[1]:
+                self._fbo = Fbo(size=fbo_size)
             self._fbo.clear()
             with self._fbo:
-                Color(1,1,1,1)
-                Scale(1,-1,1, origin = origin)
-                Rectangle(texture= texture, size = fbo_size)
+                Color(1, 1, 1, 1)
+                Scale(1, -1, 1, origin=origin)
+                Rectangle(texture=texture, size=fbo_size)
             self._fbo.draw()
 
             # save these for self.analyze_pixels_callback()
@@ -188,8 +199,9 @@ class Preview(AnchorLayout):
             # ready
             self._image_available.set()
 
-    def image_scheduler(self):
-        while True:
+    def image_scheduler(self, stop):
+        Logger.info("Image An Thread: Started")
+        while not stop():
             self._image_available.wait()
             self._image_available.clear()
             if not self.camera_connected:
@@ -199,15 +211,16 @@ class Preview(AnchorLayout):
             self.analyze_pixels_callback(self.pixels, self.im_size, self.tpos,
                                          self.scale, self.mirror)
             self._busy = False
+        Logger.info("Image An Thread: Stopping")
 
     def possible_canvas_callback(self, texture, tex_size, tex_pos):
         if self.camera_connected:
             self.canvas_instructions_callback(texture, tex_size, tex_pos)
 
     ##########################################
-    # Data Analysis Callbacks 
+    # Data Analysis Callbacks
     ##########################################
-    
+
     # analyze_pixels_callback()
     #
     # pixels        : Kivy Texture pixels, always RGBA
@@ -217,7 +230,7 @@ class Preview(AnchorLayout):
     # image_scale   : Ratio between the analyzed Texture resolution and
     #    screen image resolution.
     # mirror        : True if Preview is mirrored
-    
+
     def analyze_pixels_callback(self, pixels, image_size, image_pos,
                                 image_scale, mirror):
         pass
@@ -244,5 +257,3 @@ class Preview(AnchorLayout):
     def analyze_imageproxy_callback(self, image_proxy, image_pos, image_scale,
                                     mirror, degrees):
         pass
-
-
